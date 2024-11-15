@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-#define MFS_BAD_BLOCK_CONFIG                            -1000
+#define MFS_BAD_BLOCK_CONFIG_ERROR                      -1000
 #define MFS_WRONG_MODE_ERROR                            -1001
 #define MFS_FILE_NOT_FOUND_ERROR                        -1002
 #define MFS_NO_SPACE_ERROR                              -1003

@@ -154,7 +154,7 @@ int mfs_mount(mfs_t * mfs, const mfs_conf_t * conf)
 
     if(conf->block_size < (4 + 4 + 1 + 1 + 4 + 4)
        || conf->block_count < 1) {
-        return MFS_BAD_BLOCK_CONFIG;
+        return MFS_BAD_BLOCK_CONFIG_ERROR;
     }
 
     mfs->conf = conf;
