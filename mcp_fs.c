@@ -198,7 +198,7 @@ int mfs_list_files(mfs_t * mfs, void * list_file_cb_ctx, void (*list_file_cb)(vo
         }
         res = conf->read_block(conf->cb_ctx, i);
         if(res) return res;
-        list_file_cb(list_file_cb_ctx, conf->block_buf + 8);
+        list_file_cb(list_file_cb_ctx, (char *) conf->block_buf + 8);
         files_left--;
     }
 
@@ -229,7 +229,7 @@ int mfs_delete(mfs_t * mfs, const char * name)
         res = conf->read_block(conf->cb_ctx, i);
         if(res) return res;
 
-        if(0 == strcmp(name, conf->block_buf + 8)) {
+        if(0 == strcmp(name, (char *) conf->block_buf + 8)) {
             break;
         }
 
@@ -298,7 +298,7 @@ int mfs_open(mfs_t * mfs, const char * name, mfs_mode_t mode)
         res = conf->read_block(conf->cb_ctx, i);
         if(res) return res;
 
-        if(0 == strcmp(name, conf->block_buf + 8)) {
+        if(0 == strcmp(name, (char *) conf->block_buf + 8)) {
             break;
         }
 
@@ -326,7 +326,7 @@ int mfs_open(mfs_t * mfs, const char * name, mfs_mode_t mode)
         mfs->youngest += 1;
         memcpy(conf->block_buf, &mfs->youngest, 4);
         memcpy(conf->block_buf + 4, &mfs->open_file_match_index, 4);
-        strcpy(conf->block_buf + 8, name);
+        strcpy((char *) conf->block_buf + 8, name);
         mfs->writer_checksum = checksum_update(CHECKSUM_INIT_VAL, conf->block_buf, 8 + name_len + 1);
         mfs->open_file_block = i;
         mfs->open_file_first_block = i;
@@ -438,7 +438,7 @@ int mfs_write(mfs_t * mfs, uint8_t * src, int size)
     return size;
 }
 
-int mfs_close(mfs_t * mfs, uint8_t * src, int size)
+int mfs_close(mfs_t * mfs)
 {
     if(mfs->open_file_mode == -1) {
         return MFS_WRONG_MODE_ERROR;
@@ -489,5 +489,7 @@ int mfs_close(mfs_t * mfs, uint8_t * src, int size)
     }
 
     mfs->open_file_mode = -1;
+
+    return 0;
 }
 
