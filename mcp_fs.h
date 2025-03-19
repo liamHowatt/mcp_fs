@@ -45,6 +45,6 @@ int mfs_list_files(mfs_t * mfs, void * list_file_cb_ctx, void (*list_file_cb)(vo
 int mfs_delete(mfs_t * mfs, const char * name);
 int mfs_open(mfs_t * mfs, const char * name, mfs_mode_t mode);
 int mfs_read(mfs_t * mfs, uint8_t * dst, int size);
-int mfs_write(mfs_t * mfs, uint8_t * src, int size);
+int mfs_write(mfs_t * mfs, const uint8_t * src, int size);
 int mfs_close(mfs_t * mfs);
 

@@ -40,7 +40,7 @@ Properties:
   requires that all the blocks
   are scanned. Only practical
   for small volumes.
-- 1 file, 1 or more blocks.
+- 1 file == 1 or more blocks.
   No metadata blocks.
 - A file can be stored across
   blocks that are not contiguous.

@@ -388,7 +388,7 @@ int mfs_read(mfs_t * mfs, uint8_t * dst, int size)
     return total_read;
 }
 
-int mfs_write(mfs_t * mfs, uint8_t * src, int size)
+int mfs_write(mfs_t * mfs, const uint8_t * src, int size)
 {
     if(mfs->open_file_mode != MFS_MODE_WRITE) {
         return MFS_WRONG_MODE_ERROR;
