@@ -72,30 +72,30 @@ static int scan_file(const mfs_t * mfs, int * end_index_dst, int block_index, ui
 
     int current_block_index = block_index;
     while(1) {
-        res = conf->read_block(conf->cb_ctx, current_block_index);
+        res = conf->read_block(conf->cb_ctx, current_block_index, mfs->block_buf);
         if(res) return res;
         set_bit(scratch_bit_buf, current_block_index);
         *end_index_dst = current_block_index;
 
         int32_t unoccupied_data_bytes;
-        memcpy(&unoccupied_data_bytes, conf->block_buf + (conf->block_size - 8), 4);
+        memcpy(&unoccupied_data_bytes, mfs->block_buf + (conf->block_size - 8), 4);
         bool has_next_block = unoccupied_data_bytes < 0;
         uint32_t next_block_or_target_checksum;
-        memcpy(&next_block_or_target_checksum, conf->block_buf + (conf->block_size - 4), 4);
+        memcpy(&next_block_or_target_checksum, mfs->block_buf + (conf->block_size - 4), 4);
         if(!has_next_block) {
-            running_checksum = checksum_update(running_checksum, conf->block_buf, conf->block_size - 4);
+            running_checksum = checksum_update(running_checksum, mfs->block_buf, conf->block_size - 4);
             if(running_checksum != next_block_or_target_checksum) {
                 *end_index_dst = -1;
             }
             return 0;
         }
         if(next_block_or_target_checksum >= conf->block_count
-            || get_bit(conf->bit_bufs[OCCUPIED_BLOCKS], next_block_or_target_checksum)
+            || get_bit(mfs->bit_bufs[OCCUPIED_BLOCKS], next_block_or_target_checksum)
             || get_bit(scratch_bit_buf, next_block_or_target_checksum)) {
             *end_index_dst = -1;
             return 0;
         }
-        running_checksum = checksum_update(running_checksum, conf->block_buf, conf->block_size);
+        running_checksum = checksum_update(running_checksum, mfs->block_buf, conf->block_size);
         current_block_index = next_block_or_target_checksum;
     }
 }
@@ -106,47 +106,47 @@ static int mount_inner(mfs_t * mfs, int file_initial_idx)
     const mfs_conf_t * conf = mfs->conf;
 
     int file_end_idx_this;
-    res = scan_file(mfs, &file_end_idx_this, file_initial_idx, conf->bit_bufs[SCRATCH_1]);
+    res = scan_file(mfs, &file_end_idx_this, file_initial_idx, mfs->bit_bufs[SCRATCH_1]);
     if(res) return res;
     if(file_end_idx_this < 0) {
         return 0;
     }
 
-    res = conf->read_block(conf->cb_ctx, file_initial_idx);
+    res = conf->read_block(conf->cb_ctx, file_initial_idx, mfs->block_buf);
     if(res) return res;
 
     uint32_t birthday_this;
-    memcpy(&birthday_this, conf->block_buf, 4);
+    memcpy(&birthday_this, mfs->block_buf, 4);
 
     int32_t preferred_if_older;
-    memcpy(&preferred_if_older, conf->block_buf + 4, 4);
+    memcpy(&preferred_if_older, mfs->block_buf + 4, 4);
     if(preferred_if_older < 0) {
         goto label_end_success;
     }
 
     int file_end_idx_other;
-    res = scan_file(mfs, &file_end_idx_other, preferred_if_older, conf->bit_bufs[SCRATCH_2]);
+    res = scan_file(mfs, &file_end_idx_other, preferred_if_older, mfs->bit_bufs[SCRATCH_2]);
     if(res) return res;
     if(file_end_idx_other < 0) {
         goto label_end_success;
     }
 
-    res = conf->read_block(conf->cb_ctx, preferred_if_older);
+    res = conf->read_block(conf->cb_ctx, preferred_if_older, mfs->block_buf);
     if(res) return res;
 
     uint32_t birthday_other;
-    memcpy(&birthday_other, conf->block_buf, 4);
+    memcpy(&birthday_other, mfs->block_buf, 4);
     if(birthday_other <= birthday_this) {
         return 0;
     }
 
 label_end_success:
     if(birthday_this > mfs->youngest) mfs->youngest = birthday_this;
-    set_bit(conf->bit_bufs[FILE_START_BLOCKS], file_initial_idx);
+    set_bit(mfs->bit_bufs[FILE_START_BLOCKS], file_initial_idx);
     mfs->file_count += 1;
     int bit_buf_len = MFS_BIT_BUF_SIZE_BYTES(conf->block_count);
     for(int i = 0; i < bit_buf_len; i++) {
-        conf->bit_bufs[OCCUPIED_BLOCKS][i] |= conf->bit_bufs[SCRATCH_1][i];
+        mfs->bit_bufs[OCCUPIED_BLOCKS][i] |= mfs->bit_bufs[SCRATCH_1][i];
     }
     return 0;
 }
@@ -160,14 +160,25 @@ int mfs_mount(mfs_t * mfs, const mfs_conf_t * conf)
         return MFS_BAD_BLOCK_CONFIG_ERROR;
     }
 
+    int bit_buf_size = MFS_BIT_BUF_SIZE_BYTES(conf->block_count);
+
     mfs->conf = conf;
+
+    mfs->block_buf = conf->aligned_aux_memory;
+    uint8_t * aux_mem_u8 = conf->aligned_aux_memory;
+    aux_mem_u8 += conf->block_size;
+    for(int i = 0; i < 4; i++) {
+        mfs->bit_bufs[i] = aux_mem_u8;
+        aux_mem_u8 += bit_buf_size;
+    }
+
     mfs->file_count = 0;
     mfs->youngest = 0;
     mfs->open_file_mode = -1;
     mfs->needs_remount = false;
 
-    memset(conf->bit_bufs[FILE_START_BLOCKS], 0, MFS_BIT_BUF_SIZE_BYTES(conf->block_count));
-    memset(conf->bit_bufs[OCCUPIED_BLOCKS], 0, MFS_BIT_BUF_SIZE_BYTES(conf->block_count));
+    memset(mfs->bit_bufs[FILE_START_BLOCKS], 0, bit_buf_size);
+    memset(mfs->bit_bufs[OCCUPIED_BLOCKS], 0, bit_buf_size);
 
     for(int file_initial_idx = 0; file_initial_idx < conf->block_count; file_initial_idx++) {
         res = mount_inner(mfs, file_initial_idx);
@@ -208,12 +219,12 @@ int mfs_list_files(mfs_t * mfs, void * list_file_cb_ctx, void (*list_file_cb)(vo
 
     int files_left = mfs->file_count;
     for(int i = 0; files_left; i++) {
-        if(!get_bit(conf->bit_bufs[FILE_START_BLOCKS], i)) {
+        if(!get_bit(mfs->bit_bufs[FILE_START_BLOCKS], i)) {
             continue;
         }
-        res = conf->read_block(conf->cb_ctx, i);
+        res = conf->read_block(conf->cb_ctx, i, mfs->block_buf);
         if(res) return res;
-        list_file_cb(list_file_cb_ctx, (char *) conf->block_buf + 8);
+        list_file_cb(list_file_cb_ctx, (char *) mfs->block_buf + 8);
         files_left--;
     }
 
@@ -243,13 +254,13 @@ int mfs_delete(mfs_t * mfs, const char * name)
 
     int files_left = mfs->file_count;
     for(i = 0; files_left; i++) {
-        if(!get_bit(conf->bit_bufs[FILE_START_BLOCKS], i)) {
+        if(!get_bit(mfs->bit_bufs[FILE_START_BLOCKS], i)) {
             continue;
         }
-        res = conf->read_block(conf->cb_ctx, i);
+        res = conf->read_block(conf->cb_ctx, i, mfs->block_buf);
         if(res) return res;
 
-        if(0 == strcmp(name, (char *) conf->block_buf + 8)) {
+        if(0 == strcmp(name, (char *) mfs->block_buf + 8)) {
             break;
         }
 
@@ -261,30 +272,30 @@ int mfs_delete(mfs_t * mfs, const char * name)
     }
     int delete_file_page_1 = i;
 
-    clear_bit(conf->bit_bufs[FILE_START_BLOCKS], delete_file_page_1);
+    clear_bit(mfs->bit_bufs[FILE_START_BLOCKS], delete_file_page_1);
 
     uint32_t birthday;
-    memcpy(&birthday, conf->block_buf, 4);
+    memcpy(&birthday, mfs->block_buf, 4);
     if(birthday == mfs->youngest) mfs->youngest--;
 
     int end_idx;
-    res = scan_file(mfs, &end_idx, delete_file_page_1, conf->bit_bufs[SCRATCH_1]);
+    res = scan_file(mfs, &end_idx, delete_file_page_1, mfs->bit_bufs[SCRATCH_1]);
     if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
     if(end_idx < 0) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_INTERNAL_ASSERTION_ERROR);
 
     int bit_buf_len = MFS_BIT_BUF_SIZE_BYTES(conf->block_count);
     for(i = 0; i < bit_buf_len; i++) {
-        conf->bit_bufs[OCCUPIED_BLOCKS][i] &= ~conf->bit_bufs[SCRATCH_1][i];
+        mfs->bit_bufs[OCCUPIED_BLOCKS][i] &= ~mfs->bit_bufs[SCRATCH_1][i];
     }
 
     /* clobber the first page */
-    memset(conf->block_buf, 0xff, conf->block_size);
-    res = conf->write_block(conf->cb_ctx, delete_file_page_1);
+    memset(mfs->block_buf, 0xff, conf->block_size);
+    res = conf->write_block(conf->cb_ctx, delete_file_page_1, mfs->block_buf);
     if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
-    res = conf->read_block(conf->cb_ctx, delete_file_page_1);
+    res = conf->read_block(conf->cb_ctx, delete_file_page_1, mfs->block_buf);
     if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
     for(i = 0; i < conf->block_size; i++) {
-        if(conf->block_buf[i] != 0xff) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_READBACK_ERROR);
+        if(mfs->block_buf[i] != 0xff) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_READBACK_ERROR);
     }
 
     mfs->file_count -= 1;
@@ -315,13 +326,13 @@ int mfs_open(mfs_t * mfs, const char * name, mfs_mode_t mode)
 
     int files_left = mfs->file_count;
     for(i = 0; files_left; i++) {
-        if(!get_bit(conf->bit_bufs[FILE_START_BLOCKS], i)) {
+        if(!get_bit(mfs->bit_bufs[FILE_START_BLOCKS], i)) {
             continue;
         }
-        res = conf->read_block(conf->cb_ctx, i);
+        res = conf->read_block(conf->cb_ctx, i, mfs->block_buf);
         if(res) return res;
 
-        if(0 == strcmp(name, (char *) conf->block_buf + 8)) {
+        if(0 == strcmp(name, (char *) mfs->block_buf + 8)) {
             break;
         }
 
@@ -336,21 +347,21 @@ int mfs_open(mfs_t * mfs, const char * name, mfs_mode_t mode)
     else {
         mfs->open_file_match_index = files_left ? i : -1;
         for(i = 0; i < conf->block_count; i++) {
-            if(!get_bit(conf->bit_bufs[OCCUPIED_BLOCKS], i)) break;
+            if(!get_bit(mfs->bit_bufs[OCCUPIED_BLOCKS], i)) break;
         }
         if(i == conf->block_count) {
             return MFS_NO_SPACE_ERROR;
         }
-        set_bit(conf->bit_bufs[OCCUPIED_BLOCKS], i);
-        set_bit(conf->bit_bufs[FILE_START_BLOCKS], i);
+        set_bit(mfs->bit_bufs[OCCUPIED_BLOCKS], i);
+        set_bit(mfs->bit_bufs[FILE_START_BLOCKS], i);
         if(mfs->youngest == UINT32_MAX) {
             SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_BIRTHDAY_LIMIT_REACHED_ERROR);
         }
         mfs->youngest += 1;
-        memcpy(conf->block_buf, &mfs->youngest, 4);
-        memcpy(conf->block_buf + 4, &mfs->open_file_match_index, 4);
-        strcpy((char *) conf->block_buf + 8, name);
-        mfs->writer_checksum = checksum_update(CHECKSUM_INIT_VAL, conf->block_buf, 8 + name_len + 1);
+        memcpy(mfs->block_buf, &mfs->youngest, 4);
+        memcpy(mfs->block_buf + 4, &mfs->open_file_match_index, 4);
+        strcpy((char *) mfs->block_buf + 8, name);
+        mfs->writer_checksum = checksum_update(CHECKSUM_INIT_VAL, mfs->block_buf, 8 + name_len + 1);
         mfs->open_file_block = i;
         mfs->open_file_first_block = i;
     }
@@ -377,7 +388,7 @@ int mfs_read(mfs_t * mfs, uint8_t * dst, int size)
 
     while(size) {
         int32_t unoccupied_data_bytes;
-        memcpy(&unoccupied_data_bytes, conf->block_buf + (conf->block_size - 8), 4);
+        memcpy(&unoccupied_data_bytes, mfs->block_buf + (conf->block_size - 8), 4);
         bool has_next_block = unoccupied_data_bytes < 0;
         if(has_next_block) unoccupied_data_bytes = 0;
 
@@ -389,21 +400,21 @@ int mfs_read(mfs_t * mfs, uint8_t * dst, int size)
             }
 
             uint32_t new_block_idx;
-            memcpy(&new_block_idx, conf->block_buf + (conf->block_size - 4), 4);
+            memcpy(&new_block_idx, mfs->block_buf + (conf->block_size - 4), 4);
 
-            res = conf->read_block(conf->cb_ctx, new_block_idx);
+            res = conf->read_block(conf->cb_ctx, new_block_idx, mfs->block_buf);
             if(res) SET_FILE_CLOSED_THEN_RETURN(mfs, res);
 
             mfs->open_file_block_cursor = 0;
 
-            memcpy(&unoccupied_data_bytes, conf->block_buf + (conf->block_size - 8), 4);
+            memcpy(&unoccupied_data_bytes, mfs->block_buf + (conf->block_size - 8), 4);
             if(unoccupied_data_bytes < 0) unoccupied_data_bytes = 0;
             block_len_remaining = conf->block_size  - unoccupied_data_bytes - 8;
         }
 
         int copy_amount = block_len_remaining < size ? block_len_remaining : size;
 
-        memcpy(dst, &conf->block_buf[mfs->open_file_block_cursor], copy_amount);
+        memcpy(dst, &mfs->block_buf[mfs->open_file_block_cursor], copy_amount);
 
         size -= copy_amount;
         dst += copy_amount;
@@ -433,19 +444,19 @@ int mfs_write(mfs_t * mfs, const uint8_t * src, int size)
         if(!block_len_remaining) {
             uint32_t i;
             for(i = 0; i < conf->block_count; i++) {
-                if(!get_bit(conf->bit_bufs[OCCUPIED_BLOCKS], i)) break;
+                if(!get_bit(mfs->bit_bufs[OCCUPIED_BLOCKS], i)) break;
             }
             if(i == conf->block_count) {
                 SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_NO_SPACE_ERROR);
             }
-            set_bit(conf->bit_bufs[OCCUPIED_BLOCKS], i);
+            set_bit(mfs->bit_bufs[OCCUPIED_BLOCKS], i);
 
             int32_t unoccupied_data_bytes = -1;
-            memcpy(conf->block_buf + (conf->block_size - 8), &unoccupied_data_bytes, 4);
-            memcpy(conf->block_buf + (conf->block_size - 4), &i, 4);
-            mfs->writer_checksum = checksum_update(mfs->writer_checksum, conf->block_buf + (conf->block_size - 8), 8);
+            memcpy(mfs->block_buf + (conf->block_size - 8), &unoccupied_data_bytes, 4);
+            memcpy(mfs->block_buf + (conf->block_size - 4), &i, 4);
+            mfs->writer_checksum = checksum_update(mfs->writer_checksum, mfs->block_buf + (conf->block_size - 8), 8);
 
-            res = conf->write_block(conf->cb_ctx, mfs->open_file_block);
+            res = conf->write_block(conf->cb_ctx, mfs->open_file_block, mfs->block_buf);
             if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
 
             mfs->open_file_block_cursor = 0;
@@ -456,7 +467,7 @@ int mfs_write(mfs_t * mfs, const uint8_t * src, int size)
         int copy_amount = block_len_remaining < write_size_left ? block_len_remaining : write_size_left;
 
         mfs->writer_checksum = checksum_update(mfs->writer_checksum, src, copy_amount);
-        memcpy(conf->block_buf + mfs->open_file_block_cursor, src, copy_amount);
+        memcpy(mfs->block_buf + mfs->open_file_block_cursor, src, copy_amount);
 
         write_size_left -= copy_amount;
         src += copy_amount;
@@ -479,38 +490,38 @@ int mfs_close(mfs_t * mfs)
 
     if(mfs->open_file_mode == MFS_MODE_WRITE) {
         int32_t unoccupied_data_bytes = conf->block_size - mfs->open_file_block_cursor - 8;
-        memset(conf->block_buf + mfs->open_file_block_cursor, 0xff, unoccupied_data_bytes);
-        memcpy(conf->block_buf + (conf->block_size - 8), &unoccupied_data_bytes, 4);
-        mfs->writer_checksum = checksum_update(mfs->writer_checksum, conf->block_buf + mfs->open_file_block_cursor, unoccupied_data_bytes + 4);
-        memcpy(conf->block_buf + (conf->block_size - 4), &mfs->writer_checksum, 4);
+        memset(mfs->block_buf + mfs->open_file_block_cursor, 0xff, unoccupied_data_bytes);
+        memcpy(mfs->block_buf + (conf->block_size - 8), &unoccupied_data_bytes, 4);
+        mfs->writer_checksum = checksum_update(mfs->writer_checksum, mfs->block_buf + mfs->open_file_block_cursor, unoccupied_data_bytes + 4);
+        memcpy(mfs->block_buf + (conf->block_size - 4), &mfs->writer_checksum, 4);
 
-        res = conf->write_block(conf->cb_ctx, mfs->open_file_block);
+        res = conf->write_block(conf->cb_ctx, mfs->open_file_block, mfs->block_buf);
         if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
 
         int end_index;
-        res = scan_file(mfs, &end_index, mfs->open_file_first_block, conf->bit_bufs[SCRATCH_1]);
+        res = scan_file(mfs, &end_index, mfs->open_file_first_block, mfs->bit_bufs[SCRATCH_1]);
         if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
 
         if(mfs->open_file_match_index != -1) {
-            clear_bit(conf->bit_bufs[FILE_START_BLOCKS], mfs->open_file_match_index);
+            clear_bit(mfs->bit_bufs[FILE_START_BLOCKS], mfs->open_file_match_index);
 
-            res = scan_file(mfs, &end_index, mfs->open_file_match_index, conf->bit_bufs[SCRATCH_1]);
+            res = scan_file(mfs, &end_index, mfs->open_file_match_index, mfs->bit_bufs[SCRATCH_1]);
             if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
             if(end_index < 0) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_INTERNAL_ASSERTION_ERROR);
 
             int bit_buf_len = MFS_BIT_BUF_SIZE_BYTES(conf->block_count);
             for(int i = 0; i < bit_buf_len; i++) {
-                conf->bit_bufs[OCCUPIED_BLOCKS][i] &= ~conf->bit_bufs[SCRATCH_1][i];
+                mfs->bit_bufs[OCCUPIED_BLOCKS][i] &= ~mfs->bit_bufs[SCRATCH_1][i];
             }
 
             /* clobber the first page */
-            memset(conf->block_buf, 0xff, conf->block_size);
-            res = conf->write_block(conf->cb_ctx, mfs->open_file_match_index);
+            memset(mfs->block_buf, 0xff, conf->block_size);
+            res = conf->write_block(conf->cb_ctx, mfs->open_file_match_index, mfs->block_buf);
             if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
-            res = conf->read_block(conf->cb_ctx, mfs->open_file_match_index);
+            res = conf->read_block(conf->cb_ctx, mfs->open_file_match_index, mfs->block_buf);
             if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
             for(int i = 0; i < conf->block_size; i++) {
-                if(conf->block_buf[i] != 0xff) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_READBACK_ERROR);
+                if(mfs->block_buf[i] != 0xff) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_READBACK_ERROR);
             }
         }
         else {

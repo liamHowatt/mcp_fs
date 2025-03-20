@@ -12,6 +12,7 @@
 #define MFS_BIRTHDAY_LIMIT_REACHED_ERROR                -1007
 
 #define MFS_BIT_BUF_SIZE_BYTES(block_count) (((block_count) - 1) / 8 + 1)
+#define MFS_ALIGNED_AUX_MEMORY_SIZE(block_size, block_count) ((block_size) + MFS_BIT_BUF_SIZE_BYTES((block_count)) * 4)
 
 typedef enum {
     MFS_MODE_READ,
@@ -19,17 +20,18 @@ typedef enum {
 } mfs_mode_t;
 
 typedef struct {
-    uint8_t * block_buf;
-    uint8_t * bit_bufs[4];
+    void * aligned_aux_memory;
     int block_size;
     int block_count;
     void * cb_ctx;
-    int (*read_block)(void * cb_ctx, int block_index);
-    int (*write_block)(void * cb_ctx, int block_index);
+    int (*read_block)(void * cb_ctx, int block_index, void * dst);
+    int (*write_block)(void * cb_ctx, int block_index, const void * src);
 } mfs_conf_t;
 
 typedef struct {
     const mfs_conf_t * conf;
+    uint8_t * block_buf;
+    uint8_t * bit_bufs[4];
     int file_count;
     uint32_t youngest;
     int8_t open_file_mode;
