@@ -28,6 +28,9 @@ next block idx or checksum : u32
 
 #define CHECKSUM_INIT_VAL 2166136261u
 
+#define SET_NEEDS_REMOUNT_THEN_RETURN(mfs, retval) do {mfs->needs_remount = true; return retval;} while(0)
+#define SET_FILE_CLOSED_THEN_RETURN(mfs, retval) do {mfs->open_file_mode = -1; return retval;} while(0)
+
 enum {
     FILE_START_BLOCKS,
     OCCUPIED_BLOCKS,
@@ -35,17 +38,17 @@ enum {
     SCRATCH_2
 };
 
-static void set_bit(uint8_t * bit_buf, int bit_index)
+static void set_bit(uint8_t * bit_buf, unsigned bit_index)
 {
     bit_buf[bit_index / 8] |= 1 << (bit_index % 8);
 }
 
-static bool get_bit(const uint8_t * bit_buf, int bit_index)
+static bool get_bit(const uint8_t * bit_buf, unsigned bit_index)
 {
     return bit_buf[bit_index / 8] & (1 << (bit_index % 8));
 }
 
-static void clear_bit(uint8_t * bit_buf, int bit_index)
+static void clear_bit(uint8_t * bit_buf, unsigned bit_index)
 {
     bit_buf[bit_index / 8] &= ~(1 << (bit_index % 8));
 }
@@ -59,7 +62,7 @@ static uint32_t checksum_update(uint32_t hash, const uint8_t * data, int len)
     return hash;
 }
 
-static int scan_file(mfs_t * mfs, int * end_index_dst, int block_index, uint8_t * scratch_bit_buf)
+static int scan_file(const mfs_t * mfs, int * end_index_dst, int block_index, uint8_t * scratch_bit_buf)
 {
     int res;
     const mfs_conf_t * conf = mfs->conf;
@@ -161,13 +164,14 @@ int mfs_mount(mfs_t * mfs, const mfs_conf_t * conf)
     mfs->file_count = 0;
     mfs->youngest = 0;
     mfs->open_file_mode = -1;
+    mfs->needs_remount = false;
 
     memset(conf->bit_bufs[FILE_START_BLOCKS], 0, MFS_BIT_BUF_SIZE_BYTES(conf->block_count));
     memset(conf->bit_bufs[OCCUPIED_BLOCKS], 0, MFS_BIT_BUF_SIZE_BYTES(conf->block_count));
 
     for(int file_initial_idx = 0; file_initial_idx < conf->block_count; file_initial_idx++) {
         res = mount_inner(mfs, file_initial_idx);
-        if(res) return res;
+        if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res); /* a convenience for internal callers */
     }
 
     return 0;
@@ -175,7 +179,13 @@ int mfs_mount(mfs_t * mfs, const mfs_conf_t * conf)
 
 int mfs_file_count(mfs_t * mfs)
 {
+    int res;
+
+    if(mfs->needs_remount) if((res = mfs_mount(mfs, mfs->conf))) return res;
+
     if(mfs->open_file_mode != -1) {
+        if(mfs->open_file_mode == MFS_MODE_WRITE) mfs->needs_remount = true;
+        mfs->open_file_mode = -1;
         return MFS_WRONG_MODE_ERROR;
     }
 
@@ -184,11 +194,16 @@ int mfs_file_count(mfs_t * mfs)
 
 int mfs_list_files(mfs_t * mfs, void * list_file_cb_ctx, void (*list_file_cb)(void *, const char *))
 {
+    int res;
+
+    if(mfs->needs_remount) if((res = mfs_mount(mfs, mfs->conf))) return res;
+
     if(mfs->open_file_mode != -1) {
+        if(mfs->open_file_mode == MFS_MODE_WRITE) mfs->needs_remount = true;
+        mfs->open_file_mode = -1;
         return MFS_WRONG_MODE_ERROR;
     }
 
-    int res;
     const mfs_conf_t * conf = mfs->conf;
 
     int files_left = mfs->file_count;
@@ -207,11 +222,16 @@ int mfs_list_files(mfs_t * mfs, void * list_file_cb_ctx, void (*list_file_cb)(vo
 
 int mfs_delete(mfs_t * mfs, const char * name)
 {
+    int res;
+
+    if(mfs->needs_remount) if((res = mfs_mount(mfs, mfs->conf))) return res;
+
     if(mfs->open_file_mode != -1) {
+        if(mfs->open_file_mode == MFS_MODE_WRITE) mfs->needs_remount = true;
+        mfs->open_file_mode = -1;
         return MFS_WRONG_MODE_ERROR;
     }
 
-    int res;
     const mfs_conf_t * conf = mfs->conf;
     int i;
 
@@ -243,16 +263,14 @@ int mfs_delete(mfs_t * mfs, const char * name)
 
     clear_bit(conf->bit_bufs[FILE_START_BLOCKS], delete_file_page_1);
 
-    res = conf->read_block(conf->cb_ctx, delete_file_page_1);
-    if(res) return res;
     uint32_t birthday;
     memcpy(&birthday, conf->block_buf, 4);
     if(birthday == mfs->youngest) mfs->youngest--;
 
     int end_idx;
     res = scan_file(mfs, &end_idx, delete_file_page_1, conf->bit_bufs[SCRATCH_1]);
-    if(res) return res;
-    if(end_idx < 0) return MFS_INTERNAL_ASSERTION_ERROR;
+    if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
+    if(end_idx < 0) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_INTERNAL_ASSERTION_ERROR);
 
     int bit_buf_len = MFS_BIT_BUF_SIZE_BYTES(conf->block_count);
     for(i = 0; i < bit_buf_len; i++) {
@@ -262,11 +280,11 @@ int mfs_delete(mfs_t * mfs, const char * name)
     /* clobber the first page */
     memset(conf->block_buf, 0xff, conf->block_size);
     res = conf->write_block(conf->cb_ctx, delete_file_page_1);
-    if(res) return res;
+    if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
     res = conf->read_block(conf->cb_ctx, delete_file_page_1);
-    if(res) return res;
+    if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
     for(i = 0; i < conf->block_size; i++) {
-        if(conf->block_buf[i] != 0xff) return MFS_READBACK_ERROR;
+        if(conf->block_buf[i] != 0xff) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_READBACK_ERROR);
     }
 
     mfs->file_count -= 1;
@@ -276,11 +294,16 @@ int mfs_delete(mfs_t * mfs, const char * name)
 
 int mfs_open(mfs_t * mfs, const char * name, mfs_mode_t mode)
 {
+    int res;
+
+    if(mfs->needs_remount) if((res = mfs_mount(mfs, mfs->conf))) return res;
+
     if(mfs->open_file_mode != -1) {
+        if(mfs->open_file_mode == MFS_MODE_WRITE) mfs->needs_remount = true;
+        mfs->open_file_mode = -1;
         return MFS_WRONG_MODE_ERROR;
     }
 
-    int res;
     const mfs_conf_t * conf = mfs->conf;
     int i;
 
@@ -321,7 +344,7 @@ int mfs_open(mfs_t * mfs, const char * name, mfs_mode_t mode)
         set_bit(conf->bit_bufs[OCCUPIED_BLOCKS], i);
         set_bit(conf->bit_bufs[FILE_START_BLOCKS], i);
         if(mfs->youngest == UINT32_MAX) {
-            return MFS_BIRTHDAY_LIMIT_REACHED_ERROR;
+            SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_BIRTHDAY_LIMIT_REACHED_ERROR);
         }
         mfs->youngest += 1;
         memcpy(conf->block_buf, &mfs->youngest, 4);
@@ -340,7 +363,10 @@ int mfs_open(mfs_t * mfs, const char * name, mfs_mode_t mode)
 
 int mfs_read(mfs_t * mfs, uint8_t * dst, int size)
 {
+    if(mfs->needs_remount) return MFS_WRONG_MODE_ERROR;
+
     if(mfs->open_file_mode != MFS_MODE_READ) {
+        if(mfs->open_file_mode == MFS_MODE_WRITE) mfs->needs_remount = true;
         return MFS_WRONG_MODE_ERROR;
     }
 
@@ -366,7 +392,7 @@ int mfs_read(mfs_t * mfs, uint8_t * dst, int size)
             memcpy(&new_block_idx, conf->block_buf + (conf->block_size - 4), 4);
 
             res = conf->read_block(conf->cb_ctx, new_block_idx);
-            if(res) return res;
+            if(res) SET_FILE_CLOSED_THEN_RETURN(mfs, res);
 
             mfs->open_file_block_cursor = 0;
 
@@ -390,8 +416,10 @@ int mfs_read(mfs_t * mfs, uint8_t * dst, int size)
 
 int mfs_write(mfs_t * mfs, const uint8_t * src, int size)
 {
+    if(mfs->needs_remount) return MFS_WRONG_MODE_ERROR;
+
     if(mfs->open_file_mode != MFS_MODE_WRITE) {
-        return MFS_WRONG_MODE_ERROR;
+        SET_FILE_CLOSED_THEN_RETURN(mfs, MFS_WRONG_MODE_ERROR);
     }
 
     int res;
@@ -408,7 +436,7 @@ int mfs_write(mfs_t * mfs, const uint8_t * src, int size)
                 if(!get_bit(conf->bit_bufs[OCCUPIED_BLOCKS], i)) break;
             }
             if(i == conf->block_count) {
-                return MFS_NO_SPACE_ERROR;
+                SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_NO_SPACE_ERROR);
             }
             set_bit(conf->bit_bufs[OCCUPIED_BLOCKS], i);
 
@@ -418,7 +446,7 @@ int mfs_write(mfs_t * mfs, const uint8_t * src, int size)
             mfs->writer_checksum = checksum_update(mfs->writer_checksum, conf->block_buf + (conf->block_size - 8), 8);
 
             res = conf->write_block(conf->cb_ctx, mfs->open_file_block);
-            if(res) return res;
+            if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
 
             mfs->open_file_block_cursor = 0;
             mfs->open_file_block = i;
@@ -440,6 +468,8 @@ int mfs_write(mfs_t * mfs, const uint8_t * src, int size)
 
 int mfs_close(mfs_t * mfs)
 {
+    if(mfs->needs_remount) return MFS_WRONG_MODE_ERROR;
+
     if(mfs->open_file_mode == -1) {
         return MFS_WRONG_MODE_ERROR;
     }
@@ -455,18 +485,18 @@ int mfs_close(mfs_t * mfs)
         memcpy(conf->block_buf + (conf->block_size - 4), &mfs->writer_checksum, 4);
 
         res = conf->write_block(conf->cb_ctx, mfs->open_file_block);
-        if(res) return res;
+        if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
 
         int end_index;
         res = scan_file(mfs, &end_index, mfs->open_file_first_block, conf->bit_bufs[SCRATCH_1]);
-        if(res < 0) return MFS_READBACK_ERROR;
+        if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
 
         if(mfs->open_file_match_index != -1) {
             clear_bit(conf->bit_bufs[FILE_START_BLOCKS], mfs->open_file_match_index);
 
             res = scan_file(mfs, &end_index, mfs->open_file_match_index, conf->bit_bufs[SCRATCH_1]);
-            if(res) return res;
-            if(end_index < 0) return MFS_INTERNAL_ASSERTION_ERROR;
+            if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
+            if(end_index < 0) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_INTERNAL_ASSERTION_ERROR);
 
             int bit_buf_len = MFS_BIT_BUF_SIZE_BYTES(conf->block_count);
             for(int i = 0; i < bit_buf_len; i++) {
@@ -476,11 +506,11 @@ int mfs_close(mfs_t * mfs)
             /* clobber the first page */
             memset(conf->block_buf, 0xff, conf->block_size);
             res = conf->write_block(conf->cb_ctx, mfs->open_file_match_index);
-            if(res) return res;
+            if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
             res = conf->read_block(conf->cb_ctx, mfs->open_file_match_index);
-            if(res) return res;
+            if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
             for(int i = 0; i < conf->block_size; i++) {
-                if(conf->block_buf[i] != 0xff) return MFS_READBACK_ERROR;
+                if(conf->block_buf[i] != 0xff) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_READBACK_ERROR);
             }
         }
         else {

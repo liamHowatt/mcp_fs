@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stdbool.h>
 
 #define MFS_BAD_BLOCK_CONFIG_ERROR                      -1000
 #define MFS_WRONG_MODE_ERROR                            -1001
@@ -31,7 +32,8 @@ typedef struct {
     const mfs_conf_t * conf;
     int file_count;
     uint32_t youngest;
-    int open_file_mode;
+    int8_t open_file_mode;
+    bool needs_remount;
     int open_file_block_cursor;
     int32_t open_file_match_index;
     uint32_t writer_checksum;
