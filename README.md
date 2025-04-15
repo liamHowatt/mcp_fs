@@ -1,34 +1,32 @@
 # mcp_fs
 
-A filesystem.
+A simple, slow, ultracompact filesystem.
 
 ```c
 #define MY_BLOCK_SIZE 2048
 #define MY_BLOCK_COUNT 16
-static uint8_t block_buf[MY_BLOCK_SIZE];
-static int read_block_cb(void * cb_ctx, int block_index){
-	my_read_block(block_buf, block_index);
-	return 0;
+static int read_block(void * cb_ctx, int block_index, void * dst) {
+    my_read_block(dst, block_index);
+    return 0;
 }
-static int write_block_cb(void * cb_ctx, int block_index) {
-	my_write_block(block_buf, block_index);
-	return 0;
+static int write_block(void * cb_ctx, int block_index, const void * src) {
+    my_write_block(src, block_index);
+    return 0;
 }
-static uint8_t bb[4][MFS_BIT_BUF_SIZE_BYTES(MY_BLOCK_COUNT)];
+static uint8_t aligned_aux_memory[MFS_ALIGNED_AUX_MEMORY_SIZE(BLOCK_SIZE, BLOCK_COUNT)] __attribute__((aligned));
 static const mfs_conf_t conf = {
-	.block_buf = block_buf,
-	.bit_bufs = {bb[0], bb[1], bb[2], bb[3]},
-	.block_size = MY_BLOCK_SIZE,
-	.block_count = MY_BLOCK_COUNT,
-	.cb_ctx = NULL,
-	.read_block = read_block_cb,
-	.write_block = write_block_cb
+    aligned_aux_memory,
+    BLOCK_SIZE,
+    BLOCK_COUNT,
+    cb_ctx,
+    read_block,
+    write_block
 };
 static mfs_t mfs;
 int err = mfs_mount(&mfs, &conf);
-assert(err = 0);
+assert(err == 0);
 err = mfs_open(&mfs, "foo.txt", MFS_MODE_WRITE);
-assert(err = 0);
+assert(err == 0);
 /* ... */
 ```
 

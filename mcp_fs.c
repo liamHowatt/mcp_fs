@@ -53,6 +53,16 @@ static void clear_bit(uint8_t * bit_buf, unsigned bit_index)
     bit_buf[bit_index / 8] &= ~(1 << (bit_index % 8));
 }
 
+static bool and_any(const uint8_t * buf_1, const uint8_t * buf_2, size_t n)
+{
+    for(size_t i = 0; i < n; i++) {
+        if(buf_1[i] & buf_2[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static uint32_t checksum_update(uint32_t hash, const uint8_t * data, int len)
 {
     for(int i = 0; i < len; i++) {
@@ -90,7 +100,6 @@ static int scan_file(const mfs_t * mfs, int * end_index_dst, int block_index, ui
             return 0;
         }
         if(next_block_or_target_checksum >= conf->block_count
-            || get_bit(mfs->bit_bufs[OCCUPIED_BLOCKS], next_block_or_target_checksum)
             || get_bit(scratch_bit_buf, next_block_or_target_checksum)) {
             *end_index_dst = -1;
             return 0;
@@ -108,7 +117,9 @@ static int mount_inner(mfs_t * mfs, int file_initial_idx)
     int file_end_idx_this;
     res = scan_file(mfs, &file_end_idx_this, file_initial_idx, mfs->bit_bufs[SCRATCH_1]);
     if(res) return res;
-    if(file_end_idx_this < 0) {
+    if(file_end_idx_this < 0
+        || and_any(mfs->bit_bufs[OCCUPIED_BLOCKS], mfs->bit_bufs[SCRATCH_1],
+            MFS_BIT_BUF_SIZE_BYTES(conf->block_count))) {
         return 0;
     }
 
@@ -127,7 +138,9 @@ static int mount_inner(mfs_t * mfs, int file_initial_idx)
     int file_end_idx_other;
     res = scan_file(mfs, &file_end_idx_other, preferred_if_older, mfs->bit_bufs[SCRATCH_2]);
     if(res) return res;
-    if(file_end_idx_other < 0) {
+    if(file_end_idx_other < 0
+        || and_any(mfs->bit_bufs[OCCUPIED_BLOCKS], mfs->bit_bufs[SCRATCH_2],
+            MFS_BIT_BUF_SIZE_BYTES(conf->block_count))) {
         goto label_end_success;
     }
 
@@ -501,6 +514,7 @@ int mfs_close(mfs_t * mfs)
         int end_index;
         res = scan_file(mfs, &end_index, mfs->open_file_first_block, mfs->bit_bufs[SCRATCH_1]);
         if(res) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, res);
+        if(end_index < 0) SET_NEEDS_REMOUNT_THEN_RETURN(mfs, MFS_READBACK_ERROR);
 
         if(mfs->open_file_match_index != -1) {
             clear_bit(mfs->bit_bufs[FILE_START_BLOCKS], mfs->open_file_match_index);
